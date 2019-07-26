@@ -18,7 +18,7 @@ type Shared<'g, T, R> = reclaim::Shared<'g, T, R, reclaim::typenum::U0>;
 // Queue
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-/// Michael-Scott Queue with generic memory reclamation.
+/// A concurrent lock-free Michael-Scott queue with generic memory reclamation.
 pub struct Queue<T, R: GlobalReclaim> {
     head: Atomic<Node<T, R>, R>,
     tail: Atomic<Node<T, R>, R>,
@@ -36,6 +36,7 @@ impl<T, R: GlobalReclaim> Default for Queue<T, R> {
 /********** impl inherent *************************************************************************/
 
 impl<T, R: GlobalReclaim> Queue<T, R> {
+    /// Creates a new empty [`Queue`].
     #[inline]
     pub fn new() -> Self {
         let sentinel: Owned<Node<T, R>, R> = Owned::new(Node::sentinel());
@@ -52,6 +53,8 @@ impl<T, R: GlobalReclaim> Queue<T, R> {
         }
     }
 
+    /// Returns `true` if the [`Queue`] was currently empty at the time of the
+    /// call.
     #[inline]
     pub fn is_empty(&self) -> bool {
         let mut guard = R::guard();
@@ -62,6 +65,7 @@ impl<T, R: GlobalReclaim> Queue<T, R> {
         head.as_marked_ptr() == tail && head.next.load_raw(Relaxed).is_null()
     }
 
+    /// Pushes `elem` to the tail of the queue.
     #[inline]
     pub fn push(&self, elem: T) {
         let node = Owned::leak_unprotected(Owned::new(Node::new(elem)));
@@ -96,6 +100,8 @@ impl<T, R: GlobalReclaim> Queue<T, R> {
         let _ = self.tail.compare_exchange(tail, node, Release, Relaxed);
     }
 
+    /// Attempts to pop an element from the head of the queue and returns
+    /// [`None`] if the queue is empty.
     #[inline]
     pub fn pop(&self) -> Option<T> {
         let mut head_guard = R::guard();
@@ -142,11 +148,13 @@ impl<T, R: GlobalReclaim> Queue<T, R> {
 
     #[inline]
     fn load_head<'g>(&self, order: Ordering, guard: &'g mut R::Guard) -> Shared<'g, Node<T, R>, R> {
+        // both head and tail must point to a node (the sentinel)
         unsafe { self.head.load(order, guard).unwrap_unchecked() }
     }
 
     #[inline]
     fn load_tail<'g>(&self, order: Ordering, guard: &'g mut R::Guard) -> Shared<'g, Node<T, R>, R> {
+        // both head and tail must point to a node (the sentinel)
         unsafe { self.tail.load(order, guard).unwrap_unchecked() }
     }
 }
@@ -158,8 +166,10 @@ impl<T, R: GlobalReclaim> Drop for Queue<T, R> {
     fn drop(&mut self) {
         // the sentinel is always present
         let mut sentinel = self.head.take().unwrap();
+
         let mut curr = sentinel.next.take();
         while let Some(mut node) = curr {
+            // all non-sentinel nodes contain an initialized `T`, which can be dropped in place
             unsafe { ptr::drop_in_place(node.elem.as_mut_ptr()) };
             curr = node.next.take();
         }
@@ -170,6 +180,7 @@ impl<T, R: GlobalReclaim> Drop for Queue<T, R> {
 // Node
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+/// A queue node containing a generic element and an atomic next pointer.
 struct Node<T, R> {
     elem: MaybeUninit<T>,
     next: Atomic<Node<T, R>, R>,
@@ -178,6 +189,8 @@ struct Node<T, R> {
 /********** impl inherent *************************************************************************/
 
 impl<T, R> Node<T, R> {
+    /// Creates a new sentinel [`Node`] with an uninitialized element that is
+    /// never accessed or used.
     #[inline]
     fn sentinel() -> Self {
         Self {
@@ -186,6 +199,7 @@ impl<T, R> Node<T, R> {
         }
     }
 
+    /// Creates a new [`Node`] with the given `elem`.
     #[inline]
     fn new(elem: T) -> Self {
         Self {
