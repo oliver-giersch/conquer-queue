@@ -1,3 +1,5 @@
+#![feature(box_syntax)]
+
 mod faa;
 mod faa2;
 
