@@ -1,7 +1,7 @@
 mod faa;
 mod faa2;
 
-use std::mem::ManuallyDrop;
+use std::mem::MaybeUninit;
 use std::ptr;
 use std::sync::atomic::Ordering::{self, Acquire, Relaxed, Release};
 
@@ -54,10 +54,12 @@ impl<T, R: GlobalReclaim> Queue<T, R> {
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        let guard = &mut R::guard();
-        // head must be de-referenced in order to check its contents
-        let head = self.head.load(Acquire, guard).unwrap();
-        head.is_sentinel() && head.next.load_unprotected(Relaxed).is_none()
+        let mut guard = R::guard();
+
+        let head = self.load_head(Acquire, &mut guard);
+        let tail = self.tail.load_raw(Acquire);
+
+        head.as_marked_ptr() == tail && head.next.load_raw(Relaxed).is_null()
     }
 
     #[inline]
@@ -126,7 +128,7 @@ impl<T, R: GlobalReclaim> Queue<T, R> {
                 // CAS fails
                 let res = unsafe { ptr::read(&next.unwrap_unchecked().elem) };
                 if let Ok(unlinked) = self.head.compare_exchange(head, next, Release, Relaxed) {
-                    break (unlinked, ManuallyDrop::into_inner(res));
+                    break (unlinked, unsafe { res.assume_init() });
                 }
             }
         };
@@ -135,7 +137,7 @@ impl<T, R: GlobalReclaim> Queue<T, R> {
         // its former next node; since node's element is `ManuallyDrop`, it can be safely reclaimed
         // at any time, regardless of an lifetime-bound references in `T`
         unsafe { unlinked.retire_unchecked() };
-        res
+        Some(res)
     }
 
     #[inline]
@@ -154,9 +156,11 @@ impl<T, R: GlobalReclaim> Queue<T, R> {
 impl<T, R: GlobalReclaim> Drop for Queue<T, R> {
     #[inline]
     fn drop(&mut self) {
-        let mut curr = self.head.take();
+        // the sentinel is always present
+        let mut sentinel = self.head.take().unwrap();
+        let mut curr = sentinel.next.take();
         while let Some(mut node) = curr {
-            unsafe { ManuallyDrop::drop(&mut node.elem) };
+            unsafe { ptr::drop_in_place(node.elem.as_mut_ptr()) };
             curr = node.next.take();
         }
     }
@@ -167,7 +171,7 @@ impl<T, R: GlobalReclaim> Drop for Queue<T, R> {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 struct Node<T, R> {
-    elem: ManuallyDrop<Option<T>>,
+    elem: MaybeUninit<T>,
     next: Atomic<Node<T, R>, R>,
 }
 
@@ -177,7 +181,7 @@ impl<T, R> Node<T, R> {
     #[inline]
     fn sentinel() -> Self {
         Self {
-            elem: ManuallyDrop::new(None),
+            elem: MaybeUninit::uninit(),
             next: Atomic::null(),
         }
     }
@@ -185,13 +189,8 @@ impl<T, R> Node<T, R> {
     #[inline]
     fn new(elem: T) -> Self {
         Self {
-            elem: ManuallyDrop::new(Some(elem)),
+            elem: MaybeUninit::new(elem),
             next: Atomic::null(),
         }
-    }
-
-    #[inline]
-    fn is_sentinel(&self) -> bool {
-        self.elem.is_none()
     }
 }
