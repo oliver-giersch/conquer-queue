@@ -5,6 +5,8 @@ use std::mem::MaybeUninit;
 use std::ptr;
 use std::sync::atomic::Ordering::{self, Acquire, Relaxed, Release};
 
+pub use reclaim;
+
 use reclaim::prelude::*;
 use reclaim::GlobalReclaim;
 
@@ -18,7 +20,28 @@ type Shared<'g, T, R> = reclaim::Shared<'g, T, R, reclaim::typenum::U0>;
 // Queue
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-/// A concurrent lock-free Michael-Scott queue with generic memory reclamation.
+/// A concurrent lock-free FIFO queue by Michael and Scott with generic memory
+/// reclamation.
+///
+/// # Examples
+///
+/// This queue is a FIFO queue, meaning elements are popped in the same order
+/// they were pushed.
+///
+/// ```
+/// use conquer_queue::reclaim;
+///
+/// type Queue<T> = conquer_queue::Queue<T, reclaim::leak::Leaking>;
+///
+/// let queue = Queue::new();
+/// queue.push(1);
+/// queue.push(2);
+/// queue.push(3);
+///
+/// assert_eq!(queue.pop(), Some(1));
+/// assert_eq!(queue.pop(), Some(2));
+/// assert_eq!(queue.pop(), Some(3));
+/// ```
 pub struct Queue<T, R: GlobalReclaim> {
     head: Atomic<Node<T, R>, R>,
     tail: Atomic<Node<T, R>, R>,
@@ -55,6 +78,19 @@ impl<T, R: GlobalReclaim> Queue<T, R> {
 
     /// Returns `true` if the [`Queue`] was currently empty at the time of the
     /// call.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use conquer_queue::reclaim;
+    ///
+    /// type Queue<T> = conquer_queue::Queue<T, reclaim::leak::Leaking>;
+    ///
+    /// let queue = Queue::new();
+    /// assert!(queue.is_empty());
+    /// queue.push(1);
+    /// assert!(!queue.is_empty());
+    /// ```
     #[inline]
     pub fn is_empty(&self) -> bool {
         let mut guard = R::guard();
