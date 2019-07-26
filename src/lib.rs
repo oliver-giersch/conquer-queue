@@ -18,7 +18,7 @@ type Shared<'g, T, R> = reclaim::Shared<'g, T, R, reclaim::typenum::U0>;
 // Queue
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-/// TODO: Docs...
+/// Michael-Scott Queue with generic memory reclamation.
 pub struct Queue<T, R: GlobalReclaim> {
     head: Atomic<Node<T, R>, R>,
     tail: Atomic<Node<T, R>, R>,
@@ -41,8 +41,9 @@ impl<T, R: GlobalReclaim> Queue<T, R> {
         let sentinel: Owned<Node<T, R>, R> = Owned::new(Node::sentinel());
         let leaked = Owned::into_marked_ptr(sentinel);
 
-        // this is unsafe, because calling `take` on either head or tail would invalidate the other
-        // one, so drop MUST only touch the head field
+        // this is safe as long as methods like `Atomic::take` that assume the
+        // the Atomic to be the owner of its value are only called on EITHER the
+        // head or the tail
         unsafe {
             Self {
                 head: Atomic::from_raw(leaked),
