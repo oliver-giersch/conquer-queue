@@ -3,7 +3,7 @@ use std::cmp;
 use std::mem::{self, MaybeUninit};
 use std::ptr;
 use std::sync::atomic::{
-    AtomicBool, AtomicUsize,
+    spin_loop_hint, AtomicUsize,
     Ordering::{Acquire, Relaxed, Release, SeqCst},
 };
 
@@ -36,6 +36,8 @@ impl<T, R: GlobalReclaim> Default for Queue<T, R> {
 /********** impl inherent *************************************************************************/
 
 impl<T, R: GlobalReclaim> Queue<T, R> {
+    const READ_RETRIES: usize = 128;
+
     #[inline]
     pub fn new() -> Self {
         let head: Owned<Node<T, R>, R> = Owned::new(Node::new());
@@ -69,8 +71,12 @@ impl<T, R: GlobalReclaim> Queue<T, R> {
                 };
             } else {
                 let slot = &tail.elements[idx];
-                unsafe { slot.write(elem) };
-                slot.init.store(true, Release);
+                unsafe { slot.write_tentative(&elem) };
+                let prev = slot.state.fetch_or(WRITER, Release);
+                if prev == READER {
+                    continue;
+                }
+
                 return;
             }
         }
@@ -90,8 +96,24 @@ impl<T, R: GlobalReclaim> Queue<T, R> {
             }
 
             let idx: usize = head.pop_idx.fetch_add(1, SeqCst);
+            if idx < NODE_SIZE {
+                let slot = &head.elements[idx];
 
-            if idx >= NODE_SIZE {
+                for _ in 0..Self::READ_RETRIES {
+                    if slot.state.load(Relaxed) == WRITER {
+                        break;
+                    }
+
+                    spin_loop_hint(); // FIXME: use back-off
+                }
+
+                let prev = slot.state.fetch_or(READER, Acquire);
+                if prev == UNINIT {
+                    continue;
+                }
+
+                return Some(unsafe { slot.read() });
+            } else {
                 match head.next.load_unprotected(SeqCst) {
                     Some(next) => {
                         if let Ok(unlinked) =
@@ -102,13 +124,6 @@ impl<T, R: GlobalReclaim> Queue<T, R> {
                     }
                     None => return None,
                 };
-            } else {
-                let slot = &head.elements[idx];
-                if !slot.init.swap(false, Acquire) {
-                    continue;
-                }
-
-                return Some(unsafe { slot.read() });
             }
         }
     }
@@ -185,7 +200,7 @@ impl<T, R> Node<T, R> {
         (&mut *first.inner.get())
             .as_mut_ptr()
             .copy_from_nonoverlapping(elem, 1);
-        first.init.store(true, Relaxed);
+        first.state.store(WRITER, Relaxed);
 
         Self {
             push_idx: AtomicUsize::new(1),
@@ -220,7 +235,7 @@ impl<T, R> Drop for Node<T, R> {
 
         // TODO: what if panic?
         for slot in &mut self.elements[start..end] {
-            debug_assert!(slot.init.load(Relaxed));
+            debug_assert!(slot.state.load(Relaxed));
             unsafe {
                 let inner = &mut *slot.inner.get();
                 ptr::drop_in_place(inner.as_mut_ptr());
@@ -233,9 +248,13 @@ impl<T, R> Drop for Node<T, R> {
 // Slot
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+const UNINIT: usize = 0;
+const WRITER: usize = 0b01;
+const READER: usize = 0b10;
+
 struct Slot<T> {
     inner: UnsafeCell<MaybeUninit<T>>,
-    init: AtomicBool,
+    state: AtomicUsize,
 }
 
 /********** impl inherent *************************************************************************/
@@ -245,7 +264,7 @@ impl<T> Slot<T> {
     fn new() -> Self {
         Self {
             inner: UnsafeCell::new(MaybeUninit::uninit()),
-            init: AtomicBool::new(false),
+            state: AtomicUsize::new(UNINIT),
         }
     }
 
@@ -255,7 +274,9 @@ impl<T> Slot<T> {
     }
 
     #[inline]
-    unsafe fn write(&self, elem: T) {
-        (&mut *self.inner.get()).as_mut_ptr().write(elem)
+    unsafe fn write_tentative(&self, elem: &T) {
+        (&mut *self.inner.get())
+            .as_mut_ptr()
+            .copy_from_nonoverlapping(elem, 1);
     }
 }
