@@ -7,6 +7,7 @@ use std::sync::atomic::{
     Ordering::{Acquire, Relaxed, Release, SeqCst},
 };
 
+use reclaim::align::CacheAligned;
 use reclaim::prelude::*;
 use reclaim::typenum::U0;
 use reclaim::GlobalReclaim;
@@ -175,9 +176,9 @@ impl<T, R: GlobalReclaim> Drop for Queue<T, R> {
 const NODE_SIZE: usize = 1024;
 
 struct Node<T, R> {
-    push_idx: AtomicUsize,       // CacheAligned
-    pop_idx: AtomicUsize,        // CacheAligned
-    next: Atomic<Node<T, R>, R>, // CacheAligned
+    push_idx: CacheAligned<AtomicUsize>,
+    pop_idx: CacheAligned<AtomicUsize>,
+    next: CacheAligned<Atomic<Node<T, R>, R>>,
     elements: [Slot<T>; NODE_SIZE],
 }
 
@@ -185,9 +186,9 @@ impl<T, R> Node<T, R> {
     #[inline]
     fn new() -> Self {
         Self {
-            push_idx: AtomicUsize::new(0),
-            pop_idx: AtomicUsize::new(0),
-            next: Atomic::null(),
+            push_idx: CacheAligned(AtomicUsize::new(0)),
+            pop_idx: CacheAligned(AtomicUsize::new(0)),
+            next: CacheAligned(Atomic::null()),
             elements: unsafe { Self::init_elements() },
         }
     }
@@ -203,9 +204,9 @@ impl<T, R> Node<T, R> {
         first.state.store(WRITER, Relaxed);
 
         Self {
-            push_idx: AtomicUsize::new(1),
-            pop_idx: AtomicUsize::new(0),
-            next: Atomic::null(),
+            push_idx: CacheAligned(AtomicUsize::new(1)),
+            pop_idx: CacheAligned(AtomicUsize::new(0)),
+            next: CacheAligned(Atomic::null()),
             elements,
         }
     }
@@ -215,6 +216,7 @@ impl<T, R> Node<T, R> {
         self.push_idx.store(0, Relaxed);
     }
 
+    #[inline]
     unsafe fn init_elements() -> [Slot<T>; NODE_SIZE] {
         let mut uninit: MaybeUninit<[Slot<T>; NODE_SIZE]> = MaybeUninit::uninit();
         let first = uninit.as_mut_ptr() as *mut Slot<T>;
@@ -235,7 +237,6 @@ impl<T, R> Drop for Node<T, R> {
 
         // TODO: what if panic?
         for slot in &mut self.elements[start..end] {
-            debug_assert!(slot.state.load(Relaxed));
             unsafe {
                 let inner = &mut *slot.inner.get();
                 ptr::drop_in_place(inner.as_mut_ptr());

@@ -1,7 +1,6 @@
 #![feature(box_syntax)]
 
 mod faa;
-mod faa2;
 
 use std::mem::MaybeUninit;
 use std::ptr;
